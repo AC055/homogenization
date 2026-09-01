@@ -116,6 +116,33 @@ class ResultVisualizer:
 
             plt.show()
 
+    @staticmethod
+    def plot_element_field(mesh, field1, title="", colorbar_label=""):
+        
+        import matplotlib.pyplot as plt
+        import matplotlib.tri as tri
+
+        triang = tri.Triangulation(
+            mesh.p[0],
+            mesh.p[1],
+            mesh.t.T
+        )
+
+        plt.figure()
+
+        plt.tripcolor(
+            triang,
+            facecolors=field1,
+            shading='flat'
+        )
+
+        plt.colorbar(label=colorbar_label)
+
+        plt.axis('equal')
+        plt.title(title)
+        plt.show()
+
+
     # -----------------------------
     # Skewness map
     # -----------------------------

@@ -1,16 +1,17 @@
 # this file is to activate the solvers (direct fem, XMesh and cut fem) as well as the error function to obtain the results
-
+from loadLevelSet import levelSetAdapter
 
 import os
 import skfem as fem
 from skfem.models.poisson import dot,grad
+from skfem.helpers import ddot, sym_grad, eye, trace
 #from scipy.sparse.linalg import spsolve
 from skfem import asm, BilinearForm, Functional
 import numpy as np
 import meshio
-from loadLevelSet import levelSetAdapter
 # from fictDom import fictitiousDomainMesher #cutFEM
 from postProcessing import ResultVisualizer
+from skfem.models.elasticity import lame_parameters, linear_elasticity
 
 
 # ==========================================
@@ -89,10 +90,9 @@ def average_flux_x(w):
     grad_u = w['u'].grad
     return w.alpha * grad_u[0]
 
-@Functional
-def average_flux_y(w):
-    grad_u = w['u'].grad
-    return w.alpha * grad_u[1]
+
+
+
 
 '''
 class FEMSolver:
@@ -279,7 +279,9 @@ class FEMSolver:
 
     def setup_basis(self):
         self.mesh = fem.MeshTri(self.nodes, self.elements)
-        self.basis = fem.Basis(self.mesh, fem.ElementTriP1())
+        e = fem.ElementVector(fem.ElementTriP1())
+        self.basis = fem.Basis(self.mesh, e)
+        # self.basis = fem.Basis(self.mesh, fem.ElementTriP1())
 
         
     # before is incorrect for sf is because the extreme points do not capture the inner bounday nodes so that when apply the utils.solve the
@@ -300,7 +302,41 @@ class FEMSolver:
         
         return q
 
+    def compute_stress(self,basis, u, lam, mu):
+        uh = basis.interpolate(u)
+        eps = sym_grad(uh)
+        return 2.0 * mu * eps + lam * eye(trace(eps), eps.shape[0])
 
+    # @Functional
+    # def compute_stress1(w):
+    #     return w['stress']
+
+
+    # def average_stress(self, basis, stress):
+    def average_stress(self, basis, lam, mu, u):
+        uh = basis.interpolate(u)
+        eps = sym_grad(uh)
+        stress = 2.0 * mu * eps + lam * eye(trace(eps), eps.shape[0])
+        area = 1.
+        @Functional
+        def local_xx(w):
+            return w["stress"][0,0]
+
+        @Functional
+        def local_yy(w):
+            return w["stress"][1,1]
+
+        @Functional
+        def local_xy(w):
+            return w["stress"][0,1]
+
+        assemble_xx = local_xx.assemble(basis, stress=stress)
+        assemble_yy = local_yy.assemble(basis, stress=stress)
+        assemble_xy = local_xy.assemble(basis, stress=stress)
+
+        average_stress = np.array([assemble_xx, assemble_yy, assemble_xy])/area
+        
+        return average_stress
 
 class XMeshSolver(FEMSolver): 
 
@@ -330,7 +366,7 @@ class XMeshSolver(FEMSolver):
         iso_zero = (1 - ratio[:, np.newaxis]) * xyz[:, 0] + ratio[:, np.newaxis] * xyz[:, 1]
 
         # Plot the iso zero line before node movement on base mesh
-        ResultVisualizer.plot_level_set(self, xy, t2v, iso_zero, lsVal, "Before node movement")
+        # ResultVisualizer.plot_level_set(self, xy, t2v, iso_zero, lsVal, "Before node movement")
     
         
         value = np.abs(lsVal_safe[intersect_edge])
@@ -378,6 +414,7 @@ class XMeshSolver(FEMSolver):
         self.inner_nodes = self.nodes.T[np.setdiff1d(np.arange(self.nodes.shape[1]), out_nodes)].T
         self.inner_elements = ele_inter.T
         self.inner_elements_id = inside_ls
+        self.outer_elements_id = outside_ls
 
         # self.nodes = out_nodes
         # self.elements = base_ele
@@ -391,39 +428,80 @@ class XMeshSolver(FEMSolver):
     # with homhogenization for two material cases
     def solve(self,visual = True):
         self.setup_basis() 
-        basis = self.basis
+        # basis = self.basis
+        basis = fem.Basis(self.mesh,fem.ElementVector(fem.ElementTriP1()))
 
         # two material case with different alpha values, outer is always 1
         alpha = np.ones(self.mesh.nelements)
         alpha[self.inner_elements_id] = self.problem.k1
-        
+
+        # linear elastic case with two different materials
+        E = np.ones(self.mesh.nelements)
+        nu = np.ones(self.mesh.nelements)
+        E[self.inner_elements_id] = self.problem.E1
+        nu[self.inner_elements_id] = self.problem.nu1
+        E[self.outer_elements_id] = self.problem.E2
+        nu[self.outer_elements_id] = self.problem.nu2
+
+
         # interpolate the alpha value on element basis
         basis0 = basis.with_element(fem.ElementTriP0())
-        alpha_interpolate = basis0.interpolate(alpha)
+        E_interpolate = basis0.interpolate(E) 
+        nu_interpolate = basis0.interpolate(nu)
+        lam, mu = lame_parameters(E_interpolate, nu_interpolate)
+        # alpha_interpolate = basis0.interpolate(alpha)
 
         # self.mesh.save('xmesh001.msh')
 
-        A = asm(mtx_A, basis, alpha = alpha_interpolate)
+        @BilinearForm
+        def stiffness(u, v, w):
+            lam = w['lam']
+            mu = w['mu']
+            
+            eps = sym_grad(u)
+            sigma = 2. * mu * eps + lam * eye(trace(eps), eps.shape[0])
+            return ddot(sigma, sym_grad(v))
+
+        A = asm(stiffness, basis, lam = lam, mu = mu)
 
 
         source_form = self.problem.get_source_form()
-        b = asm(source_form, basis)
+        # b = asm(source_form, basis)
 
         dofsBNDs= self.get_boundaries()
         
-        uex = basis.project(lambda x: self.problem.get_val(x[0], x[1]))
-        Tx = basis.project(lambda x: x[0]) 
-        Ty = basis.project(lambda x: x[1]) 
+        Ux = basis.project(lambda x: np.array([x[0], np.zeros_like(x[0])])) 
+        Uy = basis.project(lambda x: np.array([np.zeros_like(x[1]), x[1]])) 
+        Uxy = basis.project(lambda x: np.array([0.5*x[1], 0.5*x[0]]))
 
-
-        ux = fem.utils.solve(*fem.utils.condense(A, b, x=Tx, D = dofsBNDs))
-        uy = fem.utils.solve(*fem.utils.condense(A, b, x=Ty, D = dofsBNDs))
-        # u = fem.utils.solve(*fem.utils.condense(A, b, x=uex, D=dofsBNDs))
+        # numerical displacement result
+        u_x = fem.utils.solve(*fem.utils.condense(A,x=Ux, D = dofsBNDs))
+        u_y = fem.utils.solve(*fem.utils.condense(A,x=Uy, D = dofsBNDs))
+        u_xy = fem.utils.solve(*fem.utils.condense(A,x=Uxy, D = dofsBNDs))
         
+        # calculate the average stress field, which is also the effective C tensor as the input strain is in teh mode of [x,0,0] [0,y,0] [x,y,0]
+        avg_stress1 = self.average_stress(self.basis, lam, mu, u_x)
+        avg_stress2 = self.average_stress(self.basis, lam, mu, u_y)
+        avg_stress3 = self.average_stress(self.basis, lam, mu, u_xy)
+        C_eff = np.column_stack((avg_stress1, avg_stress2, avg_stress3))
+        print(C_eff)
 
-        qx= self.compute_heat_flux(self.basis, alpha_interpolate, ux)
-        qy = self.compute_heat_flux(self.basis, alpha_interpolate, uy)
-        K_eff = np.column_stack((qx, qy))
+        # ux = fem.utils.solve(*fem.utils.condense(A, b, x=Tx, D = dofsBNDs))
+        # uy = fem.utils.solve(*fem.utils.condense(A, b, x=Ty, D = dofsBNDs))
+        # # u = fem.utils.solve(*fem.utils.condense(A, b, x=uex, D=dofsBNDs))
+        # in order to plot local stress field, here calculate the local stress
+        stress_xx = self.compute_stress(self.basis, u_x, lam, mu)
+        stress_yy = self.compute_stress(self.basis, u_y, lam, mu)
+        stress_xy = self.compute_stress(self.basis, u_xy, lam, mu)
+
+        # pick the stress field for each input strain mode
+        sigma_xx_elem = np.mean(stress_xx[0,0], axis=1)
+        sigma_yy_elem = np.mean(stress_yy[1,1], axis=1)
+        sigma_xy_elem = np.mean(stress_xy[0,1], axis=1)
+
+        # qx= self.compute_heat_flux(self.basis, alpha_interpolate, ux)
+        # qy = self.compute_heat_flux(self.basis, alpha_interpolate, uy)
+        # K_eff = np.column_stack((qx, qy))
         dof=basis.N
 
         # errs = {
@@ -433,16 +511,35 @@ class XMeshSolver(FEMSolver):
         # }
 
         if visual:
-            base = os.path.basename(self.filename) #self.filename 
-            ResultVisualizer().visual_plot(
-                                                self.basis, ux, uy, uex, alpha_interpolate,
-                                                filename = "resultsKeff.vtk",
-                                                title = base,
-                                                save_vtk= True,
-                                                show = True
-                                            )
+                ResultVisualizer.plot_element_field(
+                                            self.mesh,
+                                            sigma_xy_elem,
+                                            title=r'Local $\sigma_{xy}$',
+                                            colorbar_label=r'$\sigma_{xy}$'
+                                        )
+                ResultVisualizer.plot_element_field(
+                                                            self.mesh,
+                                                            sigma_xx_elem,
+                                                            title=r'Local $\sigma_{xx}$',
+                                                            colorbar_label=r'$\sigma_{xx}$'
+                                                        )
 
-        return dof, K_eff
+                ResultVisualizer.plot_element_field(
+                                            self.mesh,
+                                            sigma_yy_elem,
+                                            title=r'Local $\sigma_{yy}$',
+                                            colorbar_label=r'$\sigma_{yy}$'
+                                        )
+            # base = os.path.basename(self.filename) #self.filename 
+            # ResultVisualizer().visual_plot(
+            #                                     self.basis, ux, uy, uex, alpha_interpolate,
+            #                                     filename = "resultsKeff.vtk",
+            #                                     title = base,
+            #                                     save_vtk= True,
+            #                                     show = True
+            #                                 )
+
+        return dof, C_eff
 
 
         

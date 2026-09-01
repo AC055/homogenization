@@ -96,15 +96,19 @@ class CircleLaplacian(PhysicalProblemDefine):
 
 
 class CircleLaplacian2mate(PhysicalProblemDefine):
-    def __init__(self, radius=0.309,center=(0.5, 0.5), U=1.0, k1=5., k2 = 1.0):
+    def __init__(self, radius=0.309,center=(0.5, 0.5), U=1.0, k1=5, k2 = 1.0, E1 = 447., E2 = 183., nu1 = 0.19, nu2 = 0.3):
         super().__init__()
         self.xc, self.yc = center
         self.radius = radius
         self.U = U
         self.k1 = k1 #inner
         self.k2 = k2 #outer
+        self.E1 = E1 # transversal modulus of inner material
+        self.E2 = E2 # transversal modulus of outer material
+        self.nu1 = nu1 # Poisson's ratio of inner material
+        self.nu2 = nu2 # Poisson's ratio of outer material
         self.a = 0.309 #inner radius
-        self.b = 0.5 #outer radius
+        self.b = 0.5 
 
     # ----------------------------------
     # Geometry

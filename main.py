@@ -30,5 +30,6 @@ from definePhyProblem import CircleLaplacian, CircleLaplacian2mate
 
 #-----------------------thermo homogenization-----------------------
 problem = CircleLaplacian2mate()
-thermo_solver = XMeshSolver('loadLevelSet_sate.msh', problem)
-dof, Keff = thermo_solver.solve(visual=True)
+solver = XMeshSolver('loadLevelSet_sate.msh', problem)
+dof, C_eff = solver.solve(visual=True)
+print('C_eff:', C_eff)
